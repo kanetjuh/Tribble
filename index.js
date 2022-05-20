@@ -12,6 +12,16 @@
  */
 
 dev = false; // Change this if you are contributing to Tribble.
+class Product {
+    // TODO: add configuration for specific payment methods for specific products
+    price;
+    name;
+    constructor(price, name) {
+        this.price = price;
+        this.name = name;
+    }
+}
+
 const dotenvParseVariables = require('dotenv-parse-variables');
 env = require('dotenv').config({ path: dev ? 'dev.env' : '.env' });
 env = dotenvParseVariables(env.parsed)
@@ -28,6 +38,7 @@ const client = new Discord.Client({
 const enmap = require('enmap');
 const { google } = require('googleapis');
 const { Menu } = require('discord.js-menu');
+const productMap = new Map();
 
 const settings = new enmap({
     name: "settings",
@@ -66,6 +77,8 @@ if ((!env.DISCORD_TOKEN ||
     !env.GUILD_ID ||
     !env.TICKET_CATEGORY_ID ||
     !env.PURCHASED_ROLE_ID ||
+    !env.ITEMS_TO_SELL ||
+    !env.ITEMS_PRICES ||
     typeof env.USE_CASHAPP !== 'boolean' ||
     typeof env.USE_VENMO !== 'boolean' ||
     typeof env.USE_PAYPAL !== 'boolean' ||
@@ -78,6 +91,28 @@ if ((!env.DISCORD_TOKEN ||
     process.exit(1);
 }
 
+if ((product_names = process.env.ITEMS_TO_SELL.split(',')).length != (product_prices = process.env.ITEMS_PRICES.split(',')).length) {
+    log.error("The number of products doesn\'t match the number of prices. Check your .env file.");
+    process.exit(1);
+}
+
+for (var i = 0; i < product_names.length; i++) {
+    productMap.set(product_names[i], new Product(product_prices[i], product_names[i]));
+}
+
+// generate productFields for menu
+
+productFields = [];
+for (var i = 0; i < product_names.length; i++) {
+    var object = {
+        "name": product_names[i],
+        "value": product_names[i].charAt(0),
+        "inline": true
+    }
+    productFields.push(object);
+}
+
+console.log(productFields)
 client.login(env.DISCORD_TOKEN)
 
 var auth = new google.auth.OAuth2(
@@ -306,6 +341,26 @@ client.on('messageReactionAdd', async (reaction, user) => {
                             }
                         }
                     },
+                },
+                {
+                    name: 'products', // make this configurable
+                    content: new Discord.MessageEmbed({
+                        title: 'Products', // make this configurable
+                        color: process.env.MENU_COLOR,
+                        description: "Test", // make this configurable
+                        fields: productFields,
+                    }),
+                    reactions: { // TODO
+                        '✅': async () => {
+                            menu.setPage(1)
+                        },
+                        '❌': async () => {
+                            menu.stop()
+                            if (channel) {
+                                channel.delete();
+                            }
+                        }
+                    }
                 },
                 {
                     name: 'main',
