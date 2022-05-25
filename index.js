@@ -11,17 +11,21 @@
  *
  */
 
-dev = false; // Change this if you are contributing to Tribble.
+const menusMap = new Map();
 class Product {
     // TODO: add configuration for specific payment methods for specific products
     price;
     name;
-    constructor(price, name) {
+    react;
+    payments;
+    constructor(price, name, react) {
         this.price = price;
         this.name = name;
+        this.react = react;
     }
 }
 
+dev = true; // Change this if you are contributing to Tribble.
 const dotenvParseVariables = require('dotenv-parse-variables');
 env = require('dotenv').config({ path: dev ? 'dev.env' : '.env' });
 env = dotenvParseVariables(env.parsed)
@@ -47,27 +51,18 @@ const settings = new enmap({
     fetchAll: true
 });
 
-providerInfo = [
-    {
-        name: `cashapp`,
-        email: `cash@square.com`,
-        // messageQuery checks to see if it ends in .00, if it does truncate, otherwise keep the exact decimal
-        paymentAmount: `${env.PAYMENT_AMOUNT.endsWith('.00') ? env.PAYMENT_AMOUNT.substring(0, env.PAYMENT_AMOUNT.length - 3) : env.PAYMENT_AMOUNT}`,
-        messageQuery: `sent you`
-    },
-    {
-        name: `venmo`,
-        email: `venmo@venmo.com`,
-        paymentAmount: `${env.PAYMENT_AMOUNT}`,
-        messageQuery: `paid you`
-    },
-    {
-        name: `paypal`,
-        email: `service@paypal.com`,
-        paymentAmount: `${env.PAYMENT_AMOUNT}`,
-        messageQuery: ``
+class PaymentProviderInfo {
+    name;
+    email;
+    paymentString;
+    messageQuery;
+    constructor(name, email, paymentString, messageQuery) {
+        this.name = name;
+        this.email = email;
+        this.paymentString = paymentString;
+        this.messageQuery = messageQuery;
     }
-];
+}
 
 // check for all required variables
 if ((!env.DISCORD_TOKEN ||
@@ -82,7 +77,6 @@ if ((!env.DISCORD_TOKEN ||
     typeof env.USE_CASHAPP !== 'boolean' ||
     typeof env.USE_VENMO !== 'boolean' ||
     typeof env.USE_PAYPAL !== 'boolean' ||
-    !env.PAYMENT_AMOUNT ||
     !env.PAYMENT_CURRENCY) ||
     (env.USE_CASHAPP && !env.CASHAPP_USERNAME) ||
     (env.USE_VENMO && (!env.VENMO_USERNAME || !env.VENMO_4_DIGITS)) ||
@@ -91,28 +85,39 @@ if ((!env.DISCORD_TOKEN ||
     process.exit(1);
 }
 
-if ((product_names = process.env.ITEMS_TO_SELL.split(',')).length != (product_prices = process.env.ITEMS_PRICES.split(',')).length) {
+if (!env.ENABLE_PRODUCTS) {
+    product = process.env.ITEMS_TO_SELL.split(',')[0]
+}
+
+// load products info
+productsNames = process.env.ITEMS_TO_SELL.split(',');
+productsDescriptions = process.env.ITEMS_DESCRIPTIONS.split(',');
+productsPrices = process.env.ITEMS_PRICES.split(',');
+productsReacts = process.env.PRODUCTS_REACTS.split(',');
+if (productsNames.length != productsPrices.length && productsPrices.length != productsReacts.length) {
     log.error("The number of products doesn\'t match the number of prices. Check your .env file.");
     process.exit(1);
-}
-
-for (var i = 0; i < product_names.length; i++) {
-    productMap.set(product_names[i], new Product(product_prices[i], product_names[i]));
-}
-
-// generate productFields for menu
-
-productFields = [];
-for (var i = 0; i < product_names.length; i++) {
-    var object = {
-        "name": product_names[i],
-        "value": product_names[i].charAt(0),
-        "inline": true
+} else {
+    // do setup for products
+    for (var i = 0; i < productsNames.length; i++) {
+        // create a product for each product, store each by the pair "productName:Product"
+        productMap.set(productsNames[i], new Product(productsPrices[i], productsNames[i], productsReacts[i]));
     }
-    productFields.push(object);
+    // initialize and declare productFields for menu
+    productFields = [];
+    for (var i = 0; i < productsNames.length; i++) {
+        // create a new field for each product based on info in config
+        var object = {
+            "name": productsNames[i],
+            "value": productsDescriptions[i],
+            "inline": true
+        }
+        productFields.push(object);
+    }
+    // initalize productMenuReacts
+    productMenuReacts = {};
 }
 
-console.log(productFields)
 client.login(env.DISCORD_TOKEN)
 
 var auth = new google.auth.OAuth2(
@@ -122,11 +127,11 @@ var auth = new google.auth.OAuth2(
 
 auth.setCredentials({ refresh_token: env.GOOGLE_REFRESH_TOKEN });
 
-async function checkForEmail(auth, payment, code) {
+async function checkForEmail(auth, payment, code, providerInfo) {
     let valid;
     let fromAddress = providerInfo.find(object => object.name === payment).email;
     let query = providerInfo.find(object => object.name === payment).messageQuery;
-    let price = providerInfo.find(object => object.name === payment).paymentAmount;
+    let price = providerInfo.find(object => object.name === payment).paymentString;
     const gmail = google.gmail({ version: 'v1', auth });
     const emails = (await gmail.users.messages.list({
         userId: 'me',
@@ -229,6 +234,7 @@ client.on('message', async message => {
     }
 })
 
+
 client.on('messageReactionAdd', async (reaction, user) => {
     if (user.bot) return;
     if (reaction.message.id == settings.get('panel_message_id') && reaction.emoji.name == env.PANEL_REACT_EMOJI) {
@@ -241,6 +247,35 @@ client.on('messageReactionAdd', async (reaction, user) => {
             }
         }
         var identifier = Math.floor(100000 + Math.random() * 900000); // generate a random, six-digit number.
+        menu = null;
+        onPaymentSent = async () => {
+            try {
+                menu.setPage(menusMap.get("confirmation"));
+                checkForEmail(auth, selectedPayment, identifier, providerInfo).then((result) => {
+                    if (menu && result) {
+                        menu.setPage(menusMap.get("success"));
+                        ticketMember.roles.add(purchasedRole).catch(console.error);
+                    } else if (menu) {
+                        menu.setPage(menusMap.get("fail"));
+                    } else {
+                        return;
+                    }
+                })
+            } catch (error) {
+                log.error(error)
+            }
+        }
+        onTicketEnding = async (channel, isFinishing) => {
+            if (menu != null) {
+                menu.stop();
+            }
+            if (channel) {
+                channel.delete();
+            }
+            if (isFinishing) {
+                settings.delete(`${user.id}`);
+            }
+        }
         var ticket = `ticket-${identifier}`;
         reaction.message.guild.channels.create(ticket, {
             parent: env.TICKET_CATEGORY_ID,
@@ -259,7 +294,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
             ticketMember = reaction.message.guild.members.cache.get(user.id)
             identifier = identifier;
             settings.set(`${user.id}`, `${identifier}`);
-            let menu;
             // configure paymentFields in menu
             var paymentFields = [{
                 name: "Cash App",
@@ -276,28 +310,26 @@ client.on('messageReactionAdd', async (reaction, user) => {
                 value: "🇵",
                 inline: true
             }]
-
-            // configure paymentReacts in menu
             var paymentReacts = {
                 '🇨': async () => {
-                    selected = "cashapp";
-                    menu.setPage(2);
+                    selectedPayment = "cashapp";
+                    menu.setPage(menusMap.get("cashapp"));
                 },
                 '🇻': async () => {
-                    selected = "venmo";
-                    menu.setPage(3);
+                    selectedPayment = "venmo";
+                    menu.setPage(menusMap.get("venmo"));
                 },
                 '🇵': async () => {
-                    selected = "paypal";
-                    menu.setPage(4);
+                    selectedPayment = "paypal";
+                    menu.setPage(menusMap.get("paypal"));
                 },
-                '❌': async () => {
-                    menu.stop()
-                    if (channel) {
-                        channel.delete();
-                    }
-                }
+                '◀': async () => {
+                    selectedPaymentProduct = null;
+                    menu.setPage(menusMap.get("products"));
+                },
+                '❌': onTicketEnding.bind(null, channel, false)
             }
+            // NB: There may be a cleaner way to do this
             if (!env.USE_CASHAPP) {
                 paymentFields.splice(paymentFields.findIndex(({ name }) => name === "Cash App"), 1);
                 delete paymentReacts['🇨'];
@@ -310,60 +342,191 @@ client.on('messageReactionAdd', async (reaction, user) => {
                 paymentFields.splice(paymentFields.findIndex(({ name }) => name === "PayPal"), 1);
                 delete paymentReacts['🇵'];
             }
-            const pages = [
-                {
-                    name: 'intro',
-                    content: new Discord.MessageEmbed({
-                        title: 'Terms of Service',
-                        color: process.env.MENU_COLOR,
-                        description: process.env.MENU_INTRO_TEXT,
-                        fields: [
-                            {
-                                name: "Agree",
-                                value: "✅",
-                                inline: true
-                            },
-                            {
-                                name: "Cancel transaction",
-                                value: "❌",
-                                inline: true
-                            }
-                        ]
-                    }),
-                    reactions: {
-                        '✅': async () => {
-                            menu.setPage(1)
+            const menus = [];
+            const tosMenu = {
+                name: 'TOS',
+                content: new Discord.MessageEmbed({
+                    title: process.env.TOS_TITLE,
+                    color: process.env.MENU_COLOR,
+                    description: process.env.TOS_DESCRIPTION,
+                    fields: [
+                        {
+                            name: "Agree",
+                            value: "✅",
+                            inline: true
                         },
-                        '❌': async () => {
-                            menu.stop()
-                            if (channel) {
-                                channel.delete();
-                            }
+                        {
+                            name: "Cancel transaction",
+                            value: "❌",
+                            inline: true
+                        }
+                    ]
+                }),
+                reactions: {
+                    '✅': async () => {
+                        menu.setPage(menusMap.get("products"))
+                    },
+                    '❌': onTicketEnding.bind(null, channel, false)
+                }
+            }
+            for (var i = 0; i <= productsNames.length; i++) {
+                product = productsNames[i];
+                if (i == productsNames.length) {
+                    productMenuReacts['❌'] = onTicketEnding.bind(null, channel, false);
+                    break;
+                }
+            let thisReact = productsReacts[i];
+            productMenuReacts[thisReact] = async () => {
+                indexOfReact = productsReacts.indexOf(thisReact);
+                selectedProduct = productMap.get(productsNames[indexOfReact]);
+                menu.setPage(menusMap.get("payment"));
+                providerInfo = [];
+                providerInfoForProduct = [
+                    {
+                        name: `cashapp`,
+                        email: `cash@square.com`,
+                        // messageQuery checks to see if it ends in .00, if it does truncate, otherwise keep the exact decimal
+                        paymentAmount: `${selectedProduct.price.endsWith('.00') ? selectedProduct.price.substring(0, selectedProduct.price.length - 3) : selectedProduct.price}`,
+                        messageQuery: `sent you`
+                    },
+                    {
+                        name: `venmo`,
+                        email: `venmo@venmo.com`,
+                        paymentAmount: `${selectedProduct.price}`,
+                        messageQuery: `paid you`
+                    },
+                    {
+                        name: `paypal`,
+                        email: `service@paypal.com`,
+                        paymentAmount: `${selectedProduct.price}`,
+                        messageQuery: ``
+                    }
+                ];
+                for (provider in providerInfoForProduct) {
+                    thisProvider = providerInfoForProduct[provider];
+                    thisInfo = new PaymentProviderInfo(thisProvider.name, thisProvider.email, thisProvider.paymentAmount, thisProvider.messageQuery);
+                    providerInfo.push(thisInfo);
+                }
+                paymentMenus = [
+                    {
+                        name: 'cashapp',
+                        content: new Discord.MessageEmbed({
+                            title: `You\'re purchasing the ${selectedProduct.name} product using Cash App.`,
+                            description: `Send the **exact** amount of \`${selectedProduct.price} ${process.env.PAYMENT_CURRENCY}\` to \`$${process.env.CASHAPP_USERNAME}\` on Cash App.\n\n**__DO NOT FORGET TO SEND THE CODE IN THE NOTE.__**\n\nFor the note, type the **exact** code below: \`\`\`${identifier}\`\`\``,
+                            color: process.env.MENU_COLOR,
+                            fields: [
+                                {
+                                    name: "Return to payment selection",
+                                    value: "◀",
+                                    inline: true
+                                },
+                                {
+                                    name: "Payment has been sent",
+                                    value: "✅",
+                                    inline: true
+                                },
+                                {
+                                    name: "Cancel transaction",
+                                    value: "❌",
+                                    inline: true
+                                }
+                            ]
+                        }),
+                        reactions: {
+                            '◀': 'payment',
+                            '✅': onPaymentSent,
+                            '❌': onTicketEnding.bind(null, channel, false)
                         }
                     },
-                },
-                {
-                    name: 'products', // make this configurable
-                    content: new Discord.MessageEmbed({
-                        title: 'Products', // make this configurable
-                        color: process.env.MENU_COLOR,
-                        description: "Test", // make this configurable
-                        fields: productFields,
-                    }),
-                    reactions: { // TODO
-                        '✅': async () => {
-                            menu.setPage(1)
-                        },
-                        '❌': async () => {
-                            menu.stop()
-                            if (channel) {
-                                channel.delete();
-                            }
+                    {
+                        name: 'venmo',
+                        content: new Discord.MessageEmbed({
+                            title: `You\'re purchasing the ${selectedProduct.name} product using Venmo.`,
+                            description: `Please send the **exact** amount of \`${selectedProduct.price} ${process.env.PAYMENT_CURRENCY}\`  to \`@${process.env.VENMO_USERNAME}\` on Venmo.\n\n**__DO NOT FORGET TO SEND THE CODE IN THE NOTE.__**\n\nFor the note, type the **exact** code below: \`\`\`${identifier}\`\`\`\nIf Venmo asks for last 4 digits: \`${process.env.VENMO_4_DIGITS}\``,
+                            color: process.env.MENU_COLOR,
+                            fields: [
+                                {
+                                    name: "Return to payment selection",
+                                    value: "◀",
+                                    inline: true
+                                },
+                                {
+                                    name: "Payment has been sent",
+                                    value: "✅",
+                                    inline: true
+                                },
+                                {
+                                    name: "Cancel transaction",
+                                    value: "❌",
+                                    inline: true
+                                }
+                            ]
+                        }),
+                        reactions: {
+                            '◀': 'payment',
+                            '✅': onPaymentSent,
+                            '❌': onTicketEnding.bind(null, channel, false)
+                        }
+                    },
+                    {
+                        name: 'paypal',
+                        content: new Discord.MessageEmbed({
+                            title: `You\'re purchasing the ${selectedProduct.name} product using PayPal.`,
+                            description: `Please send the **exact** amount of \`${selectedProduct.price} ${process.env.PAYMENT_CURRENCY}\` to ${process.env.PAYPALME_LINK}.\n\n**__DO NOT FORGET TO SEND THE CODE IN THE NOTE.__**\n\nFor the note, type the **exact** code below: \`\`\`${identifier}\`\`\``,
+                            color: process.env.MENU_COLOR,
+                            fields: [
+                                {
+                                    name: "Return to payment selection",
+                                    value: "◀",
+                                    inline: true
+                                },
+                                {
+                                    name: "Payment has been sent",
+                                    value: "✅",
+                                    inline: true
+                                },
+                                {
+                                    name: "Cancel transaction",
+                                    value: "❌",
+                                    inline: true
+                                }
+                            ]
+                        }),
+                        reactions: {
+                            '◀': 'payment',
+                            '✅': onPaymentSent,
+                            '❌': onTicketEnding.bind(null, channel, false)
                         }
                     }
-                },
+                ];
+                menu.addPages(paymentMenus);
+                for (payment in paymentMenus) {
+                    thisPayment = paymentMenus[payment];
+                    menus.push(thisPayment)
+                    menusMap.set(thisPayment.name, (menusMap.size).toString())
+                }
+            }
+
+            }
+            const productsMenu = {
+                name: 'products',
+                content: new Discord.MessageEmbed({
+                    title: process.env.PRODUCTS_TITLE,
+                    color: process.env.MENU_COLOR,
+                    description: process.env.PRODUCTS_DESCRIPTION,
+                    fields: productFields,
+                }),
+                reactions: productMenuReacts
+            }
+            if (env.ENABLE_TOS) {
+                menus.push(tosMenu);
+            }
+            if (env.ENABLE_PRODUCTS) {
+                menus.push(productsMenu)
+            }
+            const pages = [
                 {
-                    name: 'main',
+                    name: 'payment',
                     content: new Discord.MessageEmbed({
                         title: 'Select a Payment Method',
                         color: process.env.MENU_COLOR,
@@ -373,160 +536,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
                     reactions: paymentReacts
                 },
                 {
-                    name: 'cashapp',
-                    content: new Discord.MessageEmbed({
-                        title: `You\'ve selected Cash App.`,
-                        description: `Send the **exact** amount of \`${process.env.PAYMENT_AMOUNT} ${process.env.PAYMENT_CURRENCY}\` to \`$${process.env.CASHAPP_USERNAME}\` on Cash App.\n\n**__DO NOT FORGET TO SEND THE CODE IN THE NOTE.__**\n\nFor the note, type the **exact** code below: \`\`\`${identifier}\`\`\``,
-                        color: process.env.MENU_COLOR,
-                        fields: [
-                            {
-                                name: "Return to payment selection",
-                                value: "◀",
-                                inline: true
-                            },
-                            {
-                                name: "Payment has been sent",
-                                value: "✅",
-                                inline: true
-                            },
-                            {
-                                name: "Cancel transaction",
-                                value: "❌",
-                                inline: true
-                            }
-                        ]
-                    }),
-                    reactions: {
-                        '◀': 'main',
-                        '✅': async () => {
-                            try {
-                                menu.setPage(5);
-                                checkForEmail(auth, selected, identifier).then((result) => {
-                                    if (menu && result) {
-                                        menu.setPage(7);
-                                        ticketMember.roles.add(purchasedRole).catch(console.error);
-                                    } else if (menu) {
-                                        menu.setPage(6);
-                                    } else {
-                                        return;
-                                    }
-                                })
-                            } catch (error) {
-                                log.error(error)
-                            }
-                        },
-                        '❌': async () => {
-                            menu.stop()
-                            if (channel) {
-                                channel.delete();
-                            }
-                        }
-                    }
-                },
-                {
-                    name: 'venmo',
-                    content: new Discord.MessageEmbed({
-                        title: `You\'ve selected Venmo.`,
-                        description: `Please send the **exact** amount of \`${process.env.PAYMENT_AMOUNT} ${process.env.PAYMENT_CURRENCY}\`  to \`@${process.env.VENMO_USERNAME}\` on Venmo.\n\n**__DO NOT FORGET TO SEND THE CODE IN THE NOTE.__**\n\nFor the note, type the **exact** code below: \`\`\`${identifier}\`\`\`\nIf Venmo asks for last 4 digits: \`${process.env.VENMO_4_DIGITS}\``,
-                        color: process.env.MENU_COLOR,
-                        fields: [
-                            {
-                                name: "Return to payment selection",
-                                value: "◀",
-                                inline: true
-                            },
-                            {
-                                name: "Payment has been sent",
-                                value: "✅",
-                                inline: true
-                            },
-                            {
-                                name: "Cancel transaction",
-                                value: "❌",
-                                inline: true
-                            }
-                        ]
-                    }),
-                    reactions: {
-                        '◀': 'main',
-                        '✅': async () => {
-                            try {
-                                menu.setPage(5);
-                                checkForEmail(auth, selected, identifier).then((result) => {
-                                    if (menu && result) {
-                                        menu.setPage(7);
-                                        ticketMember.roles.add(purchasedRole).catch(console.error);
-                                    } else if (menu) {
-                                        menu.setPage(6);
-                                    } else {
-                                        return;
-                                    }
-                                })
-                            } catch (error) {
-                                log.error(error)
-                            }
-                        },
-                        '❌': async () => {
-                            menu.stop();
-                            if (channel) {
-                                channel.delete();
-                            }
-                        }
-                    }
-                },
-                {
-                    name: 'paypal',
-                    content: new Discord.MessageEmbed({
-                        title: `You've selected PayPal.`,
-                        description: `Please send the **exact** amount of \`${process.env.PAYMENT_AMOUNT} ${process.env.PAYMENT_CURRENCY}\` to ${process.env.PAYPALME_LINK}.\n\n**__DO NOT FORGET TO SEND THE CODE IN THE NOTE.__**\n\nFor the note, type the **exact** code below: \`\`\`${identifier}\`\`\``,
-                        color: process.env.MENU_COLOR,
-                        fields: [
-                            {
-                                name: "Return to payment selection",
-                                value: "◀",
-                                inline: true
-                            },
-                            {
-                                name: "Payment has been sent",
-                                value: "✅",
-                                inline: true
-                            },
-                            {
-                                name: "Cancel transaction",
-                                value: "❌",
-                                inline: true
-                            }
-                        ]
-                    }),
-                    reactions: {
-                        '◀': 'main',
-                        '✅': async () => {
-                            try {
-                                menu.setPage(5);
-                                checkForEmail(auth, selected, identifier).then((result) => {
-                                    if (menu && result) {
-                                        menu.setPage(7);
-                                        ticketMember.roles.add(purchasedRole).catch(console.error);
-                                    } else if (menu) {
-                                        menu.setPage(6);
-                                    } else {
-                                        return;
-                                    }
-                                })
-                            } catch (error) {
-                                log.error(error)
-                            }
-                        },
-                        '❌': async () => {
-                            menu.stop();
-                            if (channel) {
-                                channel.delete();
-                            }
-                        }
-                    }
-                },
-                {
-                    name: 'check',
+                    name: 'confirmation',
                     color: process.env.MENU_COLOR,
                     content: new Discord.MessageEmbed({
                         title: `Checking for payment...`,
@@ -555,63 +565,19 @@ client.on('messageReactionAdd', async (reaction, user) => {
                     }),
                     reactions: {
                         '◀': async () => {
-                            switch (selected) {
+                            switch (selectedPayment) {
                                 case "cashapp":
-                                    menu.setPage(2);
+                                    menu.setPage(menusMap.get("cashapp"));
                                     break;
                                 case "venmo":
-                                    menu.setPage(3);
+                                    menu.setPage(menusMap.get("venmo"));
                                     break;
                                 case "paypal":
-                                    menu.setPage(4);
+                                    menu.setPage(menusMap.get("paypal"));
                                     break;
                             }
                         },
-                        '🔄': async () => {
-                            switch (selected) {
-                                case "cashapp":
-                                    menu.setPage(5);
-                                    checkForEmail(auth, selected, identifier).then((result) => {
-                                        if (result) {
-                                            //success
-                                            menu.setPage(7);
-                                            id = settings.get(`${user.id}`)
-                                            ticketMember.roles.add(purchasedRole).catch(console.error);
-                                        } else {
-                                            //fail
-                                            menu.setPage(6);
-                                        }
-                                    })
-                                    break;
-                                case "venmo":
-                                    menu.setPage(5);
-                                    checkForEmail(auth, selected, identifier).then((result) => {
-                                        if (result) {
-                                            //success
-                                            menu.setPage(7);
-                                            id = settings.get(`${user.id}`)
-                                            ticketMember.roles.add(purchasedRole).catch(console.error);
-                                        } else {
-                                            //fail
-                                            menu.setPage(6);
-                                        }
-                                    })
-                                    break;
-                                case "paypal":
-                                    menu.setPage(5);
-                                    checkForEmail(auth, selected, identifier).then((result) => {
-                                        if (result) {
-                                            //success
-                                            menu.setPage(7);
-                                            ticketMember.roles.add(purchasedRole).catch(console.error);
-                                        } else {
-                                            //fail
-                                            menu.setPage(6);
-                                        }
-                                    })
-                                    break;
-                            }
-                        }
+                        '🔄': onPaymentSent
                     }
                 },
                 {
@@ -629,19 +595,19 @@ client.on('messageReactionAdd', async (reaction, user) => {
                         ]
                     }),
                     reactions: {
-                        '✅': async () => {
-                            menu.stop()
-                            if (channel) {
-                                channel.delete();
-                            }
-                            settings.delete(`${user.id}`)
-                        }
+                        '✅': onTicketEnding.bind(null, channel, true)
                     }
                 }
             ]
-            menu = new Menu(channel, user.id, pages, 300000);
+            for (pageIndex in pages) {
+                menus.push(pages[pageIndex]);
+            }
+            for (menu in menus) {
+                menusMap.set(menus[menu].name, menu)
+            }
+            menu = new Menu(channel, user.id, menus, 300000);
             menu.start();
-            channel.send(`<@${user.id}>, your unique ticket code is \`${identifier}\`.`)
+            channel.send(`<@${user.id}>, your unique ticket code is \`${identifier}\`. **DO NOT FORGET TO SEND THE CODE.**`)
         }).catch(log.error)
     } else {
         return;
