@@ -323,8 +323,8 @@ client.on('ready', async () => {
     if (members.hasPermission('ADMINISTRATOR')) {
         log.success('Bot has the \'ADMINISTRATOR\' permission');
     } else log.warn('Bot does not have \'ADMINISTRATOR\' permission');
-    client.guilds.cache.get(env.GUILD_ID).roles.fetch().then((roles) => {
-        purchasedRole = roles.cache.get(env.PURCHASED_ROLE_ID);
+    client.guilds.cache.get(require('dotenv').config().parsed.GUILD_ID).roles.fetch().then((roles) => {
+        purchasedRole = roles.cache.get(require('dotenv').config().parsed.PURCHASED_ROLE_ID);
     });
 });
 
