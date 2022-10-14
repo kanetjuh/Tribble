@@ -318,7 +318,9 @@ client.on('ready', async () => {
             type: env.PRESENCE_TYPE.toUpperCase()
         }
     })
-    if (client.guilds.cache.get(env.GUILD_ID).member(client.user).hasPermission('ADMINISTRATOR', false)) {
+    const guild = await client.guilds.fetch(require('dotenv').config().parsed.GUILD_ID);
+    const members = await guild.members.fetch(client.user.id);
+    if (members.hasPermission('ADMINISTRATOR')) {
         log.success('Bot has the \'ADMINISTRATOR\' permission');
     } else log.warn('Bot does not have \'ADMINISTRATOR\' permission');
     client.guilds.cache.get(env.GUILD_ID).roles.fetch().then((roles) => {
